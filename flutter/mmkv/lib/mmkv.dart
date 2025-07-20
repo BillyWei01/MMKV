@@ -777,6 +777,16 @@ class MMKV {
     return _disableCompareBeforeSet(_handle);
   }
 
+  /// Enable writeBack protection to prevent data corruption from partial writes.
+  void enableWriteBackProtection() {
+    _enableWriteBackProtection(_handle);
+  }
+
+  /// Disable writeBack protection.
+  void disableWriteBackProtection() {
+    _disableWriteBackProtection(_handle);
+  }
+
   /// Check whether the MMKV file is valid or not.
   /// Note: Don't use this to check the existence of the instance, the result is undefined on nonexistent files.
   static bool isFileValid(String mmapID, {String? rootDir}) {
@@ -1012,7 +1022,11 @@ final bool Function(Pointer<Void>) _enableCompareBeforeSet = _mmkvPlatform.enabl
 
 final bool Function(Pointer<Void>) _disableCompareBeforeSet = _mmkvPlatform.disableCompareBeforeSetFunc();
 
-final int Function(Pointer<Utf8> mmapID, Pointer<Utf8> rootPath) _removeStorage = _mmkvPlatform.removeStorageFunc();
+final void Function(Pointer<Void>) _enableWriteBackProtection =
+    _mmkvPlatform.enableWriteBackProtectionFunc();
+
+final void Function(Pointer<Void>) _disableWriteBackProtection =
+    _mmkvPlatform.disableWriteBackProtectionFunc();
 
 final bool Function(Pointer<Void>) _isMultiProcess = _mmkvPlatform.isMultiProcessFunc();
 

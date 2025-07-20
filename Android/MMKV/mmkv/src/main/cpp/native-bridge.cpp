@@ -1057,6 +1057,20 @@ MMKV_JNI void disableCompareBeforeSet(JNIEnv *env, jobject instance) {
     }
 }
 
+MMKV_JNI void enableWriteBackProtection(JNIEnv *env, jobject instance) {
+    MMKV *kv = getMMKV(env, instance);
+    if (kv) {
+        kv->enableWriteBackProtection();
+    }
+}
+
+MMKV_JNI void disableWriteBackProtection(JNIEnv *env, jobject instance) {
+    MMKV *kv = getMMKV(env, instance);
+    if (kv) {
+        kv->disableWriteBackProtection();
+    }
+}
+
 MMKV_JNI bool isCompareBeforeSetEnabled(JNIEnv *env, jobject instance) {
     MMKV *kv = getMMKV(env, instance);
     if (kv) {
@@ -1223,6 +1237,8 @@ static JNINativeMethod g_methods[] = {
     {"disableAutoKeyExpire", "()Z", (void *) mmkv::disableAutoExpire},
     {"nativeEnableCompareBeforeSet", "()V", (void *) mmkv::enableCompareBeforeSet},
     {"disableCompareBeforeSet", "()V", (void *) mmkv::disableCompareBeforeSet},
+    {"enableWriteBackProtection", "()V", (void *) mmkv::enableWriteBackProtection},
+    {"disableWriteBackProtection", "()V", (void *) mmkv::disableWriteBackProtection},
     {"isCompareBeforeSetEnabled", "()Z", (void *) mmkv::isCompareBeforeSetEnabled},
     {"isEncryptionEnabled", "()Z", (void *) mmkv::isEncryptionEnabled},
     {"isExpirationEnabled", "()Z", (void *) mmkv::isExpirationEnabled},

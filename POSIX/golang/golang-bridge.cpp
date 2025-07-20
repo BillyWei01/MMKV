@@ -620,6 +620,20 @@ MMKV_EXPORT bool disableCompareBeforeSet(void *handle) {
     return false;
 }
 
+MMKV_EXPORT void enableWriteBackProtection(void *handle) {
+    MMKV *kv = static_cast<MMKV *>(handle);
+    if (kv) {
+        kv->enableWriteBackProtection();
+    }
+}
+
+MMKV_EXPORT void disableWriteBackProtection(void *handle) {
+    MMKV *kv = static_cast<MMKV *>(handle);
+    if (kv) {
+        kv->disableWriteBackProtection();
+    }
+}
+
 extern "C" void myLogHandler(int64_t level, GoStringWrap file, int64_t line, GoStringWrap function, GoStringWrap message);
 
 void cLogHandler(MMKVLogLevel level, const char *file, int line, const char *function, const std::string &message) {

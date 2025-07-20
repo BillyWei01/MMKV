@@ -298,6 +298,22 @@ class MMKVPluginPlatformFFI extends MMKVPluginPlatform {
   }
 
   @override
+  void Function(Pointer<Void>) enableWriteBackProtectionFunc() {
+    return nativeLib()
+        .lookup<NativeFunction<Void Function(Pointer<Void>)>>(
+            nativeFuncName("enableWriteBackProtection"))
+        .asFunction();
+  }
+
+  @override
+  void Function(Pointer<Void>) disableWriteBackProtectionFunc() {
+    return nativeLib()
+        .lookup<NativeFunction<Void Function(Pointer<Void>)>>(
+            nativeFuncName("disableWriteBackProtection"))
+        .asFunction();
+  }
+
+  @override
   int Function(Pointer<Utf8> mmapID, Pointer<Utf8> rootPath) removeStorageFunc() {
     return nativeLib().lookup<NativeFunction<Int8 Function(Pointer<Utf8>, Pointer<Utf8>)>>(nativeFuncName("removeStorage")).asFunction();
   }

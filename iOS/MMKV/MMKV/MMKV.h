@@ -301,6 +301,12 @@ class MMKV;
 
 - (BOOL)disableCompareBeforeSet;
 
+/// Enable writeBack protection to prevent data corruption from partial writes
+- (void)enableWriteBackProtection;
+
+/// Disable writeBack protection
+- (void)disableWriteBackProtection;
+
 - (void)removeValueForKey:(NSString *)key NS_SWIFT_NAME(removeValue(forKey:));
 
 - (void)removeValuesForKeys:(NSArray<NSString *> *)arrKeys NS_SWIFT_NAME(removeValues(forKeys:));

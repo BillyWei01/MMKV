@@ -1374,6 +1374,16 @@ public class MMKV implements SharedPreferences, SharedPreferences.Editor {
     public native void disableCompareBeforeSet();
 
     /**
+     * Enable writeBack protection to prevent data corruption from partial writes.
+     */
+    public native void enableWriteBackProtection();
+
+    /**·
+     * Disable writeBack protection.
+     */
+    public native void disableWriteBackProtection();
+
+    /**
      * Intentionally Not Supported. Because MMKV does type-eraser inside to get better performance.
      */
     @Override

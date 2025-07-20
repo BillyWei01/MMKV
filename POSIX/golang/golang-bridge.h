@@ -109,6 +109,9 @@ bool disableAutoExpire(void *handle);
 bool enableCompareBeforeSet(void *handle);
 bool disableCompareBeforeSet(void *handle);
 
+void enableWriteBackProtection(void *handle);
+void disableWriteBackProtection(void *handle);
+
 int32_t pageSize();
 const char *version();
 const char *getRootDir();

@@ -719,6 +719,14 @@ static BOOL g_hasCalledInitializeMMKV = NO;
     return m_mmkv->disableCompareBeforeSet();
 }
 
+- (void)enableWriteBackProtection {
+    m_mmkv->enableWriteBackProtection();
+}
+
+- (void)disableWriteBackProtection {
+    m_mmkv->disableWriteBackProtection();
+}
+
 - (void)removeValueForKey:(NSString *)key {
     m_mmkv->removeValueForKey(key);
 }

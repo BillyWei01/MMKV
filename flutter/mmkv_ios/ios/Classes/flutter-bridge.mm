@@ -538,6 +538,20 @@ MMKV_EXPORT bool MMKV_FUNC(disableCompareBeforeSet)(const void *handle) {
     return false;
 }
 
+MMKV_EXPORT void MMKV_FUNC(enableWriteBackProtection)(const void *handle) {
+    MMKV *kv = (__bridge MMKV *) handle;
+    if (kv) {
+        [kv enableWriteBackProtection];
+    }
+}
+
+MMKV_EXPORT void MMKV_FUNC(disableWriteBackProtection)(const void *handle) {
+    MMKV *kv = (__bridge MMKV *) handle;
+    if (kv) {
+        [kv disableWriteBackProtection];
+    }
+}
+
 MMKV_EXPORT bool MMKV_FUNC(isFileValid)(const char *mmapID, const char *rootDir) {
     auto strID = [NSString stringWithUTF8String:mmapID];
 

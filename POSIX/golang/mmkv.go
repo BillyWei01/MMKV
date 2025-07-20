@@ -235,6 +235,9 @@ type MMKV interface {
 	EnableCompareBeforeSet() bool
 	DisableCompareBeforeSet() bool
 
+	EnableWriteBackProtection()
+	DisableWriteBackProtection()
+
 	IsMultiProcess() bool
 	IsReadOnly() bool
 }
@@ -719,6 +722,14 @@ func (kv ctorMMKV) EnableCompareBeforeSet() bool {
 func (kv ctorMMKV) DisableCompareBeforeSet() bool {
 	ret := C.disableCompareBeforeSet(unsafe.Pointer(kv))
 	return bool(ret)
+}
+
+func (kv ctorMMKV) EnableWriteBackProtection() {
+	C.enableWriteBackProtection(unsafe.Pointer(kv))
+}
+
+func (kv ctorMMKV) DisableWriteBackProtection() {
+	C.disableWriteBackProtection(unsafe.Pointer(kv))
 }
 
 func (kv ctorMMKV) IsMultiProcess() bool {

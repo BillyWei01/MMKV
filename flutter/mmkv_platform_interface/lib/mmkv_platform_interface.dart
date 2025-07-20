@@ -289,6 +289,14 @@ class MMKVPluginPlatform {
     throw UnimplementedError();
   }
 
+  void Function(Pointer<Void>) enableWriteBackProtectionFunc() {
+    throw UnimplementedError();
+  }
+
+  void Function(Pointer<Void>) disableWriteBackProtectionFunc() {
+    throw UnimplementedError();
+  }
+
   int Function(Pointer<Utf8> mmapID, Pointer<Utf8> rootPath) removeStorageFunc() {
     throw UnimplementedError();
   }
