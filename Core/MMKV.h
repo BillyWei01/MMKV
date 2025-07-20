@@ -146,6 +146,13 @@ class MMKV_EXPORT MMKV {
 
     bool m_enableCompareBeforeSet = false;
 
+    bool m_enableWriteBackProtection = false;
+
+#ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
+    // Test variables for simulating partial write failure
+    static bool s_simulatePartialWriteFailure;
+#endif
+
 #ifdef MMKV_APPLE
 #ifdef __OBJC__
     using MMKVKey_t = NSString *__unsafe_unretained;
@@ -168,7 +175,7 @@ class MMKV_EXPORT MMKV {
     void loadFromFile();
 
     void partialLoadFromFile();
-    
+
 //#if defined(MMKV_APPLE) || defined(MMKV_WIN32)
 // the disk corruption detection is tested in iOS/Win32, but not Android
 // let's assume what works for iOS also works on Android for they are all POSIX
@@ -254,6 +261,29 @@ class MMKV_EXPORT MMKV {
     static size_t backupAllToDirectory(const MMKVPath_t &dstDir, const MMKVPath_t &srcDir, bool isInSpecialDir);
     static bool restoreOneFromDirectory(const std::string &mmapKey, const MMKVPath_t &srcPath, const MMKVPath_t &dstPath, bool compareFullPath);
     static size_t restoreAllFromDirectory(const MMKVPath_t &srcDir, const MMKVPath_t &dstDir, bool isInSpecialDir);
+
+    // WriteBack protection related methods
+    bool backupDataToMetaFile(uint8_t *buffer, size_t size, uint32_t restorePoint);
+    bool restoreDataFromMetaFile();
+    bool ensureMetaFileSize(size_t requiredSize);
+    void clearMetaFileBackup();
+
+    void memmoveDictionary(mmkv::MMKVMap &dic, mmkv::CodedOutputData *output, uint8_t *ptr, mmkv::AESCrypt *encrypter, size_t totalSize);
+    uint8_t* memmoveSectionsWithBackup(const std::vector<std::pair<uint32_t, uint32_t>>& dataSections,
+                                        uint8_t* writePtr, uint8_t* basePtr);
+
+#ifndef MMKV_DISABLE_CRYPT
+    void memmoveDictionary(mmkv::MMKVMapCrypt &dic, mmkv::CodedOutputData *output, uint8_t *ptr,
+                               mmkv::AESCrypt *decrypter, mmkv::AESCrypt *encrypter,
+                               std::pair<mmkv::MMBuffer, size_t> &preparedData);
+    
+
+    void memmoveCryptedSectionsWithBackup( mmkv::CodedOutputData *output, uint8_t *ptr,
+                                         mmkv::AESCrypt *decrypter, mmkv::AESCrypt *encrypter,
+                                         std::pair<mmkv::MMBuffer, size_t> &preparedData,
+                                         std::vector<mmkv::KeyValueHolderCrypt *> &vec,
+                                         uint32_t sizeHolderSize, uint32_t sizeHolder);
+#endif
 
     static uint32_t getCurrentTimeInSecond();
     uint32_t getExpireTimeForKey(MMKVKey_t key);
@@ -530,9 +560,20 @@ public:
     bool enableCompareBeforeSet();
     bool disableCompareBeforeSet();
 
+    // WriteBack protection control
+    void enableWriteBackProtection();
+    void disableWriteBackProtection();
+
+#ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
+    // Test methods for simulating partial write failure
+    static void enablePartialWriteFailureSimulation();
+    static void disablePartialWriteFailureSimulation();
+#endif
+
     bool isExpirationEnabled() const { return m_enableKeyExpire; }
     bool isEncryptionEnabled() const { return m_dicCrypt; }
     bool isCompareBeforeSetEnabled() const { return m_enableCompareBeforeSet && !m_enableKeyExpire && !m_dicCrypt; }
+    bool isWriteBackProtectionEnabled() const { return m_enableWriteBackProtection; }
 
 #ifdef MMKV_APPLE
 #ifdef __OBJC__

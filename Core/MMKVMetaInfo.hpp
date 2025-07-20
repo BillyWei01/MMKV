@@ -50,6 +50,30 @@ enum MMKVVersion : uint32_t {
     MMKVVersionHolder = MMKVVersionNext + 1,
 };
 
+constexpr uint32_t MMKV_BACKUP_MAGIC = 0x4D4D4B56; // 'MMKV' in hex
+
+struct MMKVBackupInfo {
+    uint32_t m_magic = 0;           // MMKV_BACKUP_MAGIC when backup is valid
+    uint32_t m_restorePoint = 0;    // restore point in the file, where the backup data starts
+    uint32_t m_backupDataSize = 0;  // size of backup data
+    uint32_t m_restoredFileCRC = 0; // CRC of the complete file after restoration
+
+    bool hasData() const {
+        return m_magic == MMKV_BACKUP_MAGIC && m_backupDataSize > 0;
+    }
+
+    void clearData() {
+        memset(this, 0, sizeof(MMKVBackupInfo));
+    }
+
+    void update(uint32_t restorePoint, uint32_t backupDataSize,  uint32_t restoredFileCRC) {
+        m_magic = MMKV_BACKUP_MAGIC;
+        m_restorePoint = restorePoint;
+        m_backupDataSize = backupDataSize;
+        m_restoredFileCRC = restoredFileCRC;
+    }
+};
+
 struct MMKVMetaInfo {
     uint32_t m_crcDigest = 0;
     uint32_t m_version = MMKVVersionSequence;
@@ -65,6 +89,11 @@ struct MMKVMetaInfo {
     } m_lastConfirmedMetaInfo;
 
     uint64_t m_flags = 0;
+
+    MMKVBackupInfo m_backupInfo;
+
+    // reserved for future use
+    uint32_t m_reserved[16];
 
     enum MMKVMetaInfoFlag : uint64_t {
         EnableKeyExipre = 1 << 0,
@@ -83,6 +112,12 @@ struct MMKVMetaInfo {
         auto other = (MMKVMetaInfo *) ptr;
         other->m_crcDigest = m_crcDigest;
         other->m_actualSize = m_actualSize;
+    }
+
+    void writeBackupInfoOnly(void *ptr) const{
+        MMKV_ASSERT(ptr);
+        auto other = (MMKVMetaInfo*)ptr;
+        other->m_backupInfo = m_backupInfo;
     }
 
     void read(const void *ptr) {
