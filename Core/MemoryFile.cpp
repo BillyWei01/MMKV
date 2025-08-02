@@ -236,6 +236,36 @@ bool MemoryFile::msync(SyncFlag syncFlag) {
     return false;
 }
 
+bool MemoryFile::msyncRange(size_t offset, size_t length, SyncFlag syncFlag) {
+    if (m_readOnly) {
+        // there's no point in msync() readonly memory
+        return true;
+    }
+    if (!m_ptr) {
+        return false;
+    }
+    
+    // validate range boundaries
+    if (offset >= m_size) {
+        MMKVError("msyncRange offset %zu exceeds file size %zu [%s]", offset, m_size, m_diskFile.m_path.c_str());
+        return false;
+    }
+    
+    // clamp length to not exceed file boundaries
+    size_t actualLength = std::min(length, m_size - offset);
+    if (actualLength == 0) {
+        return true; // nothing to sync
+    }
+    
+    auto ret = ::msync(static_cast<uint8_t*>(m_ptr) + offset, actualLength, syncFlag ? MS_SYNC : MS_ASYNC);
+    if (ret == 0) {
+        return true;
+    }
+    MMKVError("fail to msyncRange [%s] at offset %zu, length %zu, %s", 
+              m_diskFile.m_path.c_str(), offset, actualLength, strerror(errno));
+    return false;
+}
+
 bool MemoryFile::mmapOrCleanup(FileLock *fileLock) {
     auto oldPtr = m_ptr;
     auto mode = m_readOnly ? PROT_READ : (PROT_READ | PROT_WRITE);

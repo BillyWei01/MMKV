@@ -1551,6 +1551,32 @@ static napi_value disableCompareBeforeSet(napi_env env, napi_callback_info info)
     return NAPIUndefined(env);
 }
 
+static napi_value enableWriteBackProtection(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    NAPI_CALL(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+
+    auto handle = NValueToUInt64(env, args[0]);
+    MMKV *kv = reinterpret_cast<MMKV *>(handle);
+    if (kv) {
+        kv->enableWriteBackProtection();
+    }
+    return NAPIUndefined(env);
+}
+
+static napi_value disableWriteBackProtection(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    NAPI_CALL(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+
+    auto handle = NValueToUInt64(env, args[0]);
+    MMKV *kv = reinterpret_cast<MMKV *>(handle);
+    if (kv) {
+        kv->disableWriteBackProtection();
+    }
+    return NAPIUndefined(env);
+}
+
 // mmkvWithIDAndSize(mmapID: string, size: number, mode: number, cryptKey?: string): bigint
 static napi_value mmkvWithIDAndSize(napi_env env, napi_callback_info info) {
     size_t argc = 5;
@@ -1799,6 +1825,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "disableAutoKeyExpire", nullptr, disableAutoKeyExpire, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "enableCompareBeforeSet", nullptr, enableCompareBeforeSet, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "disableCompareBeforeSet", nullptr, disableCompareBeforeSet, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "enableWriteBackProtection", nullptr, enableWriteBackProtection, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "disableWriteBackProtection", nullptr, disableWriteBackProtection, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "mmkvWithIDAndSize", nullptr, mmkvWithIDAndSize, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "mmkvWithAshmemFD", nullptr, mmkvWithAshmemFD, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "ashmemFD", nullptr, ashmemFD, nullptr, nullptr, nullptr, napi_default, nullptr },

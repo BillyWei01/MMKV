@@ -65,6 +65,8 @@ export const enableAutoKeyExpire: (handle: bigint, expireDurationInSecond: numbe
 export const disableAutoKeyExpire: (handle: bigint) => boolean;
 export const enableCompareBeforeSet: (handle: bigint) => void;
 export const disableCompareBeforeSet: (handle: bigint) => void;
+export const enableWriteBackProtection: (handle: bigint) => void;
+export const disableWriteBackProtection: (handle: bigint) => void;
 export const mmkvWithIDAndSize: (mmapID: string, size: number, mode: number, cryptKey?: string) => bigint;
 export const mmkvWithAshmemFD: (mmapID: string, fd: number, metaFD: number, cryptKey?: string) => bigint;
 export const ashmemFD: (handle: bigint) => number;

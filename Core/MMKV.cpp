@@ -1195,7 +1195,7 @@ void MMKV::sync(SyncFlag flag) {
     SCOPED_LOCK(m_exclusiveProcessLock);
 
     m_file->msync(flag);
-    m_metaFile->msync(flag);
+    syncMetaFile(flag);
 }
 
 void MMKV::lock() {

@@ -22,6 +22,10 @@ cmake_minimum_required(VERSION 3.10.0)
 
 project(MMKV)
 
+# Add test macro for simulating partial write failure
+#add_compile_definitions(TEST_WRITEBACK_DAMAGE_RECOVERY)
+#add_compile_definitions(MMKV_DEBUG)
+
 add_subdirectory(src)
 add_subdirectory(demo)
 

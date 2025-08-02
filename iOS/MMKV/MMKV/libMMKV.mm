@@ -719,6 +719,14 @@ static BOOL g_hasCalledInitializeMMKV = NO;
     return m_mmkv->disableCompareBeforeSet();
 }
 
+- (void)enableWriteBackProtection {
+    m_mmkv->enableWriteBackProtection();
+}
+
+- (void)disableWriteBackProtection {
+    m_mmkv->disableWriteBackProtection();
+}
+
 - (void)removeValueForKey:(NSString *)key {
     m_mmkv->removeValueForKey(key);
 }
@@ -1166,7 +1174,7 @@ static NSString *md5(NSString *value) {
     return [self removeStorage:mmapID rootPath:rootPath];
 }
 
-+ (BOOL)checkExist:(NSString *)mmapID rootPath:(nullable NSString *)path NS_SWIFT_NAME(removeStorage(for:rootPath:)) {
++ (BOOL)checkExist:(NSString *)mmapID rootPath:(nullable NSString *)path NS_SWIFT_NAME(checkExist(for:rootPath:)) {
     if (mmapID.length > 0) {
         if (path.length > 0) {
             string rootPath(path.UTF8String);
@@ -1178,7 +1186,7 @@ static NSString *md5(NSString *value) {
     return NO;
 }
 
-+ (BOOL)checkExist:(NSString *)mmapID mode:(MMKVMode)mode NS_SWIFT_NAME(removeStorage(for:mode:)) {
++ (BOOL)checkExist:(NSString *)mmapID mode:(MMKVMode)mode NS_SWIFT_NAME(checkExist(for:mode:)) {
     auto rootPath = (mode & MMKVSingleProcess) ? nil : g_groupPath;
     return [self checkExist:mmapID rootPath:rootPath];
 }

@@ -1310,8 +1310,462 @@ void testImport() {
     assert(dst->count(true) == 0);
 }
 
-void MyLogHandler(MMKVLogLevel level, const char *file, int line, const char *function, const string &message) {
 
+#ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
+
+bool executeWriteBackTest(bool useEncryption, bool useBackup, bool simulatePartialFailure, const string& testDesc) {
+    cout << "Scenario: First section at correct position, multiple sections" << endl;
+
+    string mmkvId = "writeback_test_" + to_string(useEncryption) + "_" + to_string(useBackup) + "_" + to_string(simulatePartialFailure);
+    string cryptKey = "test_key_branch2";
+
+    // create MMKV instance based on encryption setting
+    MMKV* mmkv;
+    if (useEncryption) {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, &cryptKey);
+    } else {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, nullptr);
+    }
+
+    // configure backup based on setting
+    if (useBackup) {
+        mmkv->enableWriteBackProtection();
+    } else {
+        mmkv->disableWriteBackProtection();
+    }
+
+    mmkv->clearAll();
+
+    auto pageSize = static_cast<size_t>(getpagesize());
+    constexpr int n = 16;
+    string strArray[n];
+
+    cout << "Step 1: Creating Branch 2 data layout..." << endl;
+    auto stringSize = pageSize / 4 - 20;
+    for (int i = 0; i < n; i++) {
+        string key = "key_" + to_string(i);
+        string value(stringSize, 'A' + (i % 26));
+        strArray[i] = value; // store for later verification
+        mmkv->set(value, key);
+        cout << "Set " << key << ", " << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+    }
+
+    cout << "Step 2: Creating fragmentation..." << endl;
+    for (int i = 1; i < n; i += 2) {
+        string key = "key_" + to_string(i);
+        mmkv->removeValueForKey(key);
+        cout << "Removed " << key << ", " << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+    }
+
+    if (simulatePartialFailure) {
+        cout << "Step 3: Enable partial write failure simulation..." << endl;
+        MMKV::enablePartialWriteFailureSimulation();
+    } else {
+        cout << "Step 3: Proceeding without failure simulation..." << endl;
+    }
+
+    cout << "Step 4: Trigger GC " << (simulatePartialFailure ? " (expecting partial write failure)" : "") << "..." << endl;
+    string largeValue(pageSize/2, 'X');
+    try {
+        bool result = mmkv->set(largeValue, "large_key");
+        cout<< "ValidDataX actualSize:" << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+        cout << "Set large key result: " << (result ? "success" : "failed") << endl;
+    } catch (const exception& e) {
+        cout << "Exception caught during GC trigger: " << e.what() << endl;
+    }
+
+    if (simulatePartialFailure) {
+        cout << "Step 5: Disable simulation..." << endl;
+        MMKV::disablePartialWriteFailureSimulation();
+    } else {
+        cout << "Step 5: Proceeding to verification..." << endl;
+    }
+
+    if (!simulatePartialFailure) {
+        cout << "Step 6: Verifying data integrity immediately after writeBack..." << endl;
+        string verifyResult;
+        // check expected keys that should still exist
+        for (int i = 0; i < n; i+=2) {
+            string key = "key_" + to_string(i);
+            assert(mmkv->getString(key, verifyResult) && verifyResult == strArray[i]);
+        }
+        // check keys that should be absent
+        for (int i = 1; i < n; i += 2) {
+            string key = "key_" + to_string(i);
+            assert(!mmkv->containsKey(key));
+        }
+        cout << "✓ Data integrity verified after writeBack operation" << endl;
+    } else {
+        // when simulatePartialFailure is enabled, the exception is thrown before 
+        // offset update (see MMKV_IO.cpp line 1215-1220), so KeyValueHolder offsets
+        // may be inconsistent with actual data layout in memory, making immediate
+        // verification unreliable. Recovery will be tested after reopening.
+        cout << "Step 6: Skipping immediate verification due to simulated failure..." << endl;
+        cout << "       (Exception thrown before offset update, data structure may be inconsistent)" << endl;
+    }
+    
+    mmkv->close();
+
+    cout << "Step 7: Reopening to test " << (simulatePartialFailure ? "recovery" : "normal persistence") << "..." << endl;
+    if (useEncryption) {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, &cryptKey);
+    } else {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, nullptr);
+    }
+
+    cout << "Step 8: Verifying data integrity after " << (simulatePartialFailure ? "recovery" : "reopening") << "..." << endl;
+    string result;
+    bool success = true;
+
+    // check expected keys
+    for (int i = 0; i < n; i+=2) {
+        string key = "key_" + to_string(i);
+        if (mmkv->getString(key, result) && result == strArray[i]) {
+            cout << "✓ " << key << ": correct"  << endl;
+        } else {
+            cout << "✗ " << key << ": missing or incorrect" << endl;
+            success = false;
+        }
+    }
+
+    for (int i = 1; i < n; i += 2) {
+        string key = "key_" + to_string(i);
+        if (!mmkv->containsKey(key)) {
+            cout << "✓ Removed key " << key << " is still absent" << endl;
+        } else {
+            cout << "✗ Removed key " << key << " unexpectedly present" << endl;
+            success = false;
+        }
+    }
+
+    // check large key (may or may not be there depending on crash timing and backup setting)
+    if (mmkv->getString("large_key", result)) {
+        cout << "✓ Large key recovered: " << (result == largeValue ? "correct" : "incorrect") << endl;
+    } else {
+        if (simulatePartialFailure) {
+            cout << "- Large key not recovered (expected if crash occurred before completion)" << endl;
+        } else {
+            cout << "✗ Large key missing (unexpected in normal operation)" << endl;
+            success = false;
+        }
+    }
+
+    // determine test result based on backup availability and failure simulation
+    string testResult;
+    if (!useBackup) {
+        // without backup, we only test normal operation (simulatePartialFailure should be false)
+        if (simulatePartialFailure) {
+            testResult = "SKIP (meaningless without backup)";
+        } else {
+            testResult = success ? "PASS" : "FAIL";
+        }
+    } else {
+        // with backup protection enabled
+        if (simulatePartialFailure) {
+            // backup should enable recovery from partial write failures
+            testResult = success ? "PASS" : "FAIL";
+        } else {
+            // normal operation should always succeed with backup
+            testResult = success ? "PASS" : "FAIL";
+        }
+    }
+
+    cout << testDesc << " Test: " << testResult << endl;
+    mmkv->close();
+
+    return success;
+}
+
+void testWritebackDamageRecovery() {
+    cout << "\n=== Testing WriteBack Protection (6 Modes) ===" << endl;
+
+    // test combinations with logical significance:
+    // - useBackup=false: only test normal operation (simulateFailure=false)
+    // - useBackup=true: test both normal operation and failure recovery (simulateFailure=true/false)
+    struct TestMode {
+        bool useEncryption;
+        bool useBackup;
+        bool simulateFailure;
+        string description;
+    };
+
+    vector<TestMode> testModes = {
+        // normal operation tests (no backup, no simulated failure - baseline tests)
+        {false, false, false, "Non-encrypted, No backup, Normal operation"},
+        {true, false, false, "Encrypted, No backup, Normal operation"},
+        
+        // backup protection tests (with backup, test both normal and failure scenarios)
+        {false, true, false, "Non-encrypted, With backup, Normal operation"},
+        {false, true, true, "Non-encrypted, With backup, With failure"},
+        {true, true, false, "Encrypted, With backup, Normal operation"},
+        {true, true, true, "Encrypted, With backup, With failure"}
+    };
+
+    for (const auto& mode : testModes) {
+        cout << "\n--- Testing Mode: " << mode.description << " ---" << endl;
+        bool success = executeWriteBackTest(mode.useEncryption, mode.useBackup, mode.simulateFailure, mode.description);
+        assert(success); // ensure each test passes before proceeding
+    }
+    cout << "All WriteBack Protection tests passed!\n" << endl;
+}
+
+bool testRemoveFrontData(bool useEncryption, const string& testDesc) {
+    cout << "Scenario: Remove front half data, test backup protection during GC" << endl;
+
+    string mmkvId = "remove_front_test_" + to_string(useEncryption);
+    string cryptKey = "test_key_front";
+
+    // create MMKV instance based on encryption setting
+    MMKV* mmkv;
+    if (useEncryption) {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, &cryptKey);
+    } else {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, nullptr);
+    }
+
+    // always enable backup protection for this test
+    mmkv->enableWriteBackProtection();
+    mmkv->clearAll();
+
+    auto pageSize = static_cast<size_t>(getpagesize());
+    constexpr int n = 16;
+    string strArray[n];
+
+    cout << "Step 1: Creating initial data layout..." << endl;
+    auto stringSize = pageSize / 4 - 20;
+    for (int i = 0; i < n; i++) {
+        string key = "key_" + to_string(i);
+        string value(stringSize, 'A' + (i % 26));
+        strArray[i] = value; // store for later verification
+        mmkv->set(value, key);
+        cout << "Set " << key << ", " << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+    }
+
+    cout << "Step 2: Removing front half data (creating fragmentation at front)..." << endl;
+    for (int i = 0; i < n/2; i++) {
+        string key = "key_" + to_string(i);
+        mmkv->removeValueForKey(key);
+        cout << "Removed " << key << ", " << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+    }
+
+    cout << "Step 3: Trigger GC (should use backup protection)..." << endl;
+    string largeValue(pageSize/2, 'X');
+    bool result = mmkv->set(largeValue, "large_key");
+    cout<< "After GC actualSize:" << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+    cout << "Set large key result: " << (result ? "success" : "failed") << endl;
+
+    cout << "Step 4: Verifying data integrity immediately after writeBack..." << endl;
+    string verifyResult;
+    // this verification ensures that KeyValueHolder offsets are correctly updated
+    // after memmove operations, which is critical for immediate data access
+
+    // check that front half keys are gone
+    for (int i = 0; i < n/2; i++) {
+        string key = "key_" + to_string(i);
+        assert(!mmkv->containsKey(key));
+    }
+    // check that back half keys are still there
+    for (int i = n/2; i < n; i++) {
+        string key = "key_" + to_string(i);
+        assert(mmkv->getString(key, verifyResult) && verifyResult == strArray[i]);
+    }
+    // check large key
+    assert(mmkv->getString("large_key", verifyResult) && verifyResult == largeValue);
+    cout << "✓ Data integrity verified after writeBack operation" << endl;
+
+    cout << "Step 5: Close and reopen..." << endl;
+    mmkv->close();
+
+    if (useEncryption) {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, &cryptKey);
+    } else {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, nullptr);
+    }
+
+    cout << "Step 6: Verifying data integrity after front removal..." << endl;
+    string resultValue;
+    bool success = true;
+
+    // check that front half keys are gone
+    for (int i = 0; i < n/2; i++) {
+        string key = "key_" + to_string(i);
+        if (!mmkv->containsKey(key)) {
+            cout << "✓ Removed front key " << key << " is absent" << endl;
+        } else {
+            cout << "✗ Removed front key " << key << " unexpectedly present" << endl;
+            success = false;
+        }
+    }
+
+    // check that back half keys are still there
+    for (int i = n/2; i < n; i++) {
+        string key = "key_" + to_string(i);
+        if (mmkv->getString(key, resultValue) && resultValue == strArray[i]) {
+            cout << "✓ Back key " << key << ": correct"  << endl;
+        } else {
+            cout << "✗ Back key " << key << ": missing or incorrect" << endl;
+            success = false;
+        }
+    }
+
+    // Check large key
+    if (mmkv->getString("large_key", resultValue)) {
+        cout << "✓ Large key recovered: " << (resultValue == largeValue ? "correct" : "incorrect") << endl;
+    } else {
+        cout << "✗ Large key missing" << endl;
+        success = false;
+    }
+
+    string testResult = success ? "PASS" : "FAIL";
+    cout << testDesc << " Test: " << testResult << endl;
+    mmkv->close();
+
+    return success;
+}
+
+bool testRemoveTailData(bool useEncryption, const string& testDesc) {
+    cout << "Scenario: Remove tail half data, test backup protection during GC" << endl;
+
+    string mmkvId = "remove_tail_test_" + to_string(useEncryption);
+    string cryptKey = "test_key_tail";
+
+    // create MMKV instance based on encryption setting
+    MMKV* mmkv;
+    if (useEncryption) {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, &cryptKey);
+    } else {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, nullptr);
+    }
+
+    // always enable backup protection for this test
+    mmkv->enableWriteBackProtection();
+    mmkv->clearAll();
+
+    auto pageSize = static_cast<size_t>(getpagesize());
+    constexpr int n = 16;
+    string strArray[n];
+
+    cout << "Step 1: Creating initial data layout..." << endl;
+    auto stringSize = pageSize / 4 - 20;
+    for (int i = 0; i < n; i++) {
+        string key = "key_" + to_string(i);
+        string value(stringSize, 'A' + (i % 26));
+        strArray[i] = value; // Store for later verification
+        mmkv->set(value, key);
+        cout << "Set " << key << ", " << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+    }
+
+    cout << "Step 2: Removing tail half data (creating fragmentation at tail)..." << endl;
+    for (int i = n/2; i < n; i++) {
+        string key = "key_" + to_string(i);
+        mmkv->removeValueForKey(key);
+        cout << "Removed " << key << ", " << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+    }
+
+    cout << "Step 3: Trigger GC (should use backup protection)..." << endl;
+    string largeValue(pageSize/2, 'X');
+    bool result = mmkv->set(largeValue, "large_key");
+    cout<< "After GC actualSize:" << mmkv->actualSize() <<", totalSize:"<< mmkv->totalSize()<< endl;
+    cout << "Set large key result: " << (result ? "success" : "failed") << endl;
+
+    cout << "Step 4: Verifying data integrity immediately after writeBack..." << endl;
+    string verifyResult;
+    // this verification ensures that KeyValueHolder offsets are correctly updated
+    // after memmove operations, which is critical for immediate data access
+
+    // check that front half keys are still there
+    for (int i = 0; i < n/2; i++) {
+        string key = "key_" + to_string(i);
+        assert(mmkv->getString(key, verifyResult) && verifyResult == strArray[i]);
+    }
+    // check that tail half keys are gone
+    for (int i = n/2; i < n; i++) {
+        string key = "key_" + to_string(i);
+        assert(!mmkv->containsKey(key));
+    }
+    // check large key
+    assert(mmkv->getString("large_key", verifyResult) && verifyResult == largeValue);
+    cout << "✓ Data integrity verified after writeBack operation" << endl;
+
+    cout << "Step 5: Close and reopen..." << endl;
+    mmkv->close();
+
+    if (useEncryption) {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, &cryptKey);
+    } else {
+        mmkv = MMKV::mmkvWithID(mmkvId, MMKV_SINGLE_PROCESS, nullptr);
+    }
+
+    cout << "Step 6: Verifying data integrity after tail removal..." << endl;
+    string resultValue;
+    bool success = true;
+
+    // check that front half keys are still there
+    for (int i = 0; i < n/2; i++) {
+        string key = "key_" + to_string(i);
+        if (mmkv->getString(key, resultValue) && resultValue == strArray[i]) {
+            cout << "✓ Front key " << key << ": correct"  << endl;
+        } else {
+            cout << "✗ Front key " << key << ": missing or incorrect" << endl;
+            success = false;
+        }
+    }
+
+    // check that tail half keys are gone
+    for (int i = n/2; i < n; i++) {
+        string key = "key_" + to_string(i);
+        if (!mmkv->containsKey(key)) {
+            cout << "✓ Removed tail key " << key << " is absent" << endl;
+        } else {
+            cout << "✗ Removed tail key " << key << " unexpectedly present" << endl;
+            success = false;
+        }
+    }
+
+    // check large key
+    if (mmkv->getString("large_key", resultValue)) {
+        cout << "✓ Large key recovered: " << (resultValue == largeValue ? "correct" : "incorrect") << endl;
+    } else {
+        cout << "✗ Large key missing" << endl;
+        success = false;
+    }
+
+    string testResult = success ? "PASS" : "FAIL";
+    cout << testDesc << " Test: " << testResult << endl;
+    mmkv->close();
+
+    return success;
+}
+
+void testGarbageCollectionScenarios() {
+    cout << "\n=== Testing GC Scenarios with WriteBack Protection ===" << endl;
+
+    // test garbage collection scenarios: front removal vs tail removal
+    struct GCTestMode {
+        bool useEncryption;
+        string description;
+    };
+
+    vector<GCTestMode> gcTestModes = {
+        {false, "Non-encrypted"},
+        {true, "Encrypted"}
+    };
+
+    for (const auto& mode : gcTestModes) {
+        cout << "\n--- Testing Front Data Removal: " << mode.description << " ---" << endl;
+        bool success = testRemoveFrontData(mode.useEncryption, mode.description + " Front Removal");
+        assert(success); // Ensure front removal test passed before tail removal
+        
+        cout << "\n--- Testing Tail Data Removal: " << mode.description << " ---" << endl;
+        success = testRemoveTailData(mode.useEncryption, mode.description + " Tail Removal");
+        assert(success); // Ensure tail removal test passed after front removal
+    }
+    cout << "All GC Scenarios tests passed!\n" << endl;
+}
+
+#endif // TEST_WRITEBACK_DAMAGE_RECOVERY
+
+void MyLogHandler(MMKVLogLevel level, const char *file, int line, const char *function, const string &message) {
     auto desc = [level] {
         switch (level) {
             case MMKVLogDebug:
@@ -1373,4 +1827,8 @@ int main() {
     testRemoveStorage();
     testReadOnly();
     testImport();
+#ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
+    testWritebackDamageRecovery();
+    testGarbageCollectionScenarios();
+#endif
 }

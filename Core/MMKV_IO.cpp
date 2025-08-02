@@ -59,10 +59,27 @@ using KVHolderRet_t = std::pair<bool, KeyValueHolder>;
 extern ThreadLock *g_instanceLock;
 extern unordered_map<string, MMKV *> *g_instanceDic;
 
+#ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
+// test variable for simulating partial write failure
+bool MMKV::s_simulatePartialWriteFailure = false;
+#endif
+
 MMKV_NAMESPACE_BEGIN
 
 void MMKV::loadFromFile() {
     loadMetaInfoAndCheck();
+
+    // check for writeback protection backup and attempt recovery if needed
+    if (m_metaInfo->m_backupInfo.hasData()) {
+        MMKVInfo("found valid writeback protection backup for [%s], attempting recovery", m_mmapID.c_str());
+        if (restoreDataFromMetaFile()) {
+            MMKVInfo("successfully recovered writeback protection backup for [%s]", m_mmapID.c_str());
+        } else {
+            MMKVError("failed to recover writeback protection backup for [%s]", m_mmapID.c_str());
+            clearMetaFileBackup();
+        }
+    }
+
 #ifndef MMKV_DISABLE_CRYPT
     if (m_crypter) {
         if (m_metaInfo->m_version >= MMKVVersionRandomIV) {
@@ -1099,8 +1116,92 @@ bool MMKV::fullWriteback(AESCrypt *newCrypter, bool onlyWhileExpire) {
     return false;
 }
 
+uint8_t* MMKV::memmoveSectionsWithBackup(const std::vector<std::pair<uint32_t, uint32_t>>& dataSections,
+                                          uint8_t* writePtr, uint8_t* basePtr) {
+    // dataSections should not be empty
+    assert(!dataSections.empty());
+
+    size_t startIndex = 0;
+    size_t endIndex = dataSections.size();
+    uint32_t restorePoint = ItemSizeHolderSize;
+
+    // check if the first section is already at the beginning of the data region
+    if (dataSections[0].first == ItemSizeHolderSize) {
+        startIndex = 1;
+        restorePoint = ItemSizeHolderSize + dataSections[0].second;
+        writePtr += dataSections[0].second; // skip over the first section
+    }
+
+    if (endIndex > startIndex) {
+        // calculate data size to move for the range
+        uint32_t dataToMove = 0;
+        for (size_t i = startIndex; i < endIndex; i++) {
+            dataToMove += dataSections[i].second;
+        }
+
+        // ensure meta file has enough space for backup data
+        auto requiredSize = sizeof(MMKVMetaInfo) + dataToMove;
+        if (!ensureMetaFileSize(requiredSize)) {
+            MMKVError("failed to expand meta file for writeback protection backup in [%s]", m_mmapID.c_str());
+            // fallback to direct memmove without protection
+            for (size_t i = startIndex; i < endIndex; i++) {
+                const auto &section = dataSections[i];
+                memmove(writePtr, basePtr + section.first, section.second);
+                writePtr += section.second;
+            }
+            return writePtr;
+        }
+
+        // use meta file memory as buffer - data starts after MMKVMetaInfo
+        auto metaBuffer = (uint8_t*)m_metaFile->getMemory() + sizeof(MMKVMetaInfo);
+        auto bufferPtr = metaBuffer;
+        
+        // collect data sections to meta file buffer
+        for (size_t i = startIndex; i < endIndex; i++) {
+            const auto &section = dataSections[i];
+            memcpy(bufferPtr, basePtr + section.first, section.second);
+            bufferPtr += section.second;
+        }
+
+        // calculate CRC for backup validation
+        uint32_t restoredFileCRC;
+        if (restorePoint == 0) {
+            // for complete replacement, CRC is just the buffer CRC
+            restoredFileCRC = (uint32_t)CRC32(0, metaBuffer, dataToMove);
+        } else {
+            // for partial backup, combine existing data CRC with backup data CRC
+            auto mainPtr = (uint8_t*)m_file->getMemory() + Fixed32Size;
+            restoredFileCRC = (uint32_t)CRC32(0, mainPtr, restorePoint);
+            restoredFileCRC = (uint32_t)CRC32(restoredFileCRC, metaBuffer, dataToMove);
+        }
+
+        // record backup info
+        m_metaInfo->m_backupInfo.update(restorePoint, dataToMove, restoredFileCRC);
+        m_metaInfo->writeBackupInfoOnly(m_metaFile->getMemory());
+
+        MMKVInfo("backed up %u bytes of protected data to meta file for [%s], CRC: %u",
+                 dataToMove, m_mmapID.c_str(), restoredFileCRC);
+
+#ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
+        if (s_simulatePartialWriteFailure) {
+            memcpy(writePtr, metaBuffer, dataToMove / 8);
+            throw std::runtime_error("simulate partial write failure");
+        }
+#endif
+
+        // copy from meta file buffer to target location
+        memcpy(writePtr, metaBuffer, dataToMove);
+        writePtr += dataToMove;
+
+        // clear backup after successful memcpy
+        clearMetaFileBackup();
+    }
+
+    return writePtr;
+}
+
 // we don't need to really serialize the dictionary, just reuse what's already in the file
-static void
+void MMKV::
 memmoveDictionary(MMKVMap &dic, CodedOutputData *output, uint8_t *ptr, AESCrypt *encrypter, size_t totalSize) {
     auto originOutputPtr = output->curWritePointer();
     // make space to hold the fake size of dictionary's serialization result
@@ -1129,10 +1230,14 @@ memmoveDictionary(MMKVMap &dic, CodedOutputData *output, uint8_t *ptr, AESCrypt 
         }
         // do the move
         auto basePtr = ptr + Fixed32Size;
-        for (auto &section : dataSections) {
-            // memmove() should handle this well: src == dst
-            memmove(writePtr, basePtr + section.first, section.second);
-            writePtr += section.second;
+        if (m_enableWriteBackProtection) {
+            writePtr = memmoveSectionsWithBackup(dataSections, writePtr, basePtr);
+        } else {
+            for (auto &section : dataSections) {
+                // memmove() should handle this well: src == dst
+                memmove(writePtr, basePtr + section.first, section.second);
+                writePtr += section.second;
+            }
         }
         // update offset
         if (!encrypter) {
@@ -1157,7 +1262,163 @@ memmoveDictionary(MMKVMap &dic, CodedOutputData *output, uint8_t *ptr, AESCrypt 
 
 #ifndef MMKV_DISABLE_CRYPT
 
-static void memmoveDictionary(MMKVMapCrypt &dic,
+void MMKV::memmoveCryptedSectionsWithBackup(CodedOutputData *output,
+                                            uint8_t *ptr,
+                                            AESCrypt *decrypter,
+                                            AESCrypt *encrypter,
+                                            pair<MMBuffer, size_t> &preparedData,
+                                            vector<KeyValueHolderCrypt *> &vec,
+                                            uint32_t sizeHolderSize,
+                                            uint32_t sizeHolder) {
+    // calculate total size for the complete final data
+    uint32_t vecDataSize = 0;
+    uint32_t preparedDataSize = 0;
+    
+    // calculate vec data size
+    if (!vec.empty()) {
+        vector<tuple<uint32_t, uint32_t, AESCryptStatus *>> dataSections; // tuple(offset, size, cryptStatus)
+        dataSections.push_back(vec.front()->toTuple());
+        for (size_t index = 1, total = vec.size(); index < total; index++) {
+            auto kvHolder = vec[index];
+            auto &lastSection = dataSections.back();
+            if (kvHolder->offset == get<0>(lastSection) + get<1>(lastSection)) {
+                get<1>(lastSection) += kvHolder->pbKeyValueSize + kvHolder->keySize + kvHolder->valueSize;
+            } else {
+                dataSections.push_back(kvHolder->toTuple());
+            }
+        }
+        for (const auto &section : dataSections) {
+            vecDataSize += get<1>(section);
+        }
+    }
+    
+    // calculate preparedData size
+    auto &data = preparedData.first;
+    if (data.length() > 0) {
+        auto dataSize = CodedInputData(data.getPtr(), data.length()).readUInt32();
+        if (dataSize > 0) {
+            preparedDataSize = dataSize;
+        }
+    }
+    
+    uint32_t totalSize = sizeHolderSize + vecDataSize + preparedDataSize;
+    
+    // ensure meta file has enough space for backup data
+    auto requiredSize = sizeof(MMKVMetaInfo) + totalSize;
+    bool useBackupProtection = m_enableWriteBackProtection && ensureMetaFileSize(requiredSize);
+    
+    uint8_t* workBuffer = nullptr;
+    std::unique_ptr<uint8_t[]> tempBufferHolder;
+    
+    if (useBackupProtection) {
+        // use meta file memory as buffer - data starts after MMKVMetaInfo
+        workBuffer = (uint8_t*)m_metaFile->getMemory() + sizeof(MMKVMetaInfo);
+    } else {
+        // fallback to temp buffer if meta file expansion fails
+        tempBufferHolder = std::make_unique<uint8_t[]>(totalSize);
+        workBuffer = tempBufferHolder.get();
+        if (m_enableWriteBackProtection) {
+            MMKVError("failed to expand meta file for writeback protection backup in [%s], using fallback", m_mmapID.c_str());
+        }
+    }
+    
+    // build sizeHolder in work buffer
+    CodedOutputData tempOutput(workBuffer, totalSize);
+    tempOutput.writeRawVarint32(static_cast<int32_t>(sizeHolder));
+    auto tempWritePtr = workBuffer + sizeHolderSize;
+    if (encrypter) {
+        encrypter->encrypt(workBuffer, workBuffer, sizeHolderSize);
+    }
+    
+    // process vec data in work buffer
+    if (!vec.empty()) {
+        // merge nearby items to make memmove quicker
+        vector<tuple<uint32_t, uint32_t, AESCryptStatus *>> dataSections; // tuple(offset, size, cryptStatus)
+        dataSections.push_back(vec.front()->toTuple());
+        for (size_t index = 1, total = vec.size(); index < total; index++) {
+            auto kvHolder = vec[index];
+            auto &lastSection = dataSections.back();
+            if (kvHolder->offset == get<0>(lastSection) + get<1>(lastSection)) {
+                get<1>(lastSection) += kvHolder->pbKeyValueSize + kvHolder->keySize + kvHolder->valueSize;
+            } else {
+                dataSections.push_back(kvHolder->toTuple());
+            }
+        }
+        
+        // decrypt and copy vec data to work buffer
+        auto basePtr = ptr + Fixed32Size;
+        for (auto &section : dataSections) {
+            auto crypter = decrypter->cloneWithStatus(*get<2>(section));
+            crypter.decrypt(basePtr + get<0>(section), tempWritePtr, get<1>(section));
+            tempWritePtr += get<1>(section);
+        }
+        
+        // encrypt vec data in work buffer with updated offsets
+        if (encrypter) {
+            auto offset = sizeHolderSize;
+            for (auto kvHolder : vec) {
+                auto size = kvHolder->pbKeyValueSize + kvHolder->keySize + kvHolder->valueSize;
+                encrypter->getCurStatus(kvHolder->cryptStatus);
+                encrypter->encrypt(workBuffer + offset, workBuffer + offset, size);
+                kvHolder->offset = offset;
+                offset += size;
+            }
+        } else {
+            // update offsets for non-encrypted case
+            auto offset = sizeHolderSize;
+            for (auto kvHolder : vec) {
+                kvHolder->offset = offset;
+                auto size = kvHolder->pbKeyValueSize + kvHolder->keySize + kvHolder->valueSize;
+                offset += size;
+            }
+        }
+    }
+    
+    // process preparedData in work buffer
+    if (preparedDataSize > 0) {
+        auto dataPtr = (uint8_t *) data.getPtr() + pbRawVarint32Size(preparedDataSize);
+        if (encrypter) {
+            encrypter->encrypt(dataPtr, tempWritePtr, preparedDataSize);
+        } else {
+            memcpy(tempWritePtr, dataPtr, preparedDataSize);
+        }
+        tempWritePtr += preparedDataSize;
+    }
+    
+    // record backup info if using protection
+    if (useBackupProtection) {
+        // calculate CRC for complete replacement (restorePoint = 0)
+        uint32_t restoredFileCRC = (uint32_t)CRC32(0, workBuffer, totalSize);
+        
+        // record backup info
+        m_metaInfo->m_backupInfo.update(0, totalSize, restoredFileCRC);
+        m_metaInfo->writeBackupInfoOnly(m_metaFile->getMemory());
+        
+        MMKVInfo("backed up %u bytes of protected data to meta file for [%s], CRC: %u",
+                 totalSize, m_mmapID.c_str(), restoredFileCRC);
+    }
+
+#ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
+    if (s_simulatePartialWriteFailure) {
+        memcpy(output->curWritePointer(), workBuffer, totalSize / 8);
+        throw std::runtime_error("simulate partial write failure");
+    }
+#endif
+
+    // copy complete final data to target location
+    auto finalWritePtr = output->curWritePointer();
+    memcpy(finalWritePtr, workBuffer, totalSize);
+
+    // clear backup after successful copy
+    if (useBackupProtection) {
+        clearMetaFileBackup();
+    }
+    
+    output->seek(totalSize);
+    assert(totalSize == preparedData.second);
+}
+
+void MMKV::memmoveDictionary(MMKVMapCrypt &dic,
                               CodedOutputData *output,
                               uint8_t *ptr,
                               AESCrypt *decrypter,
@@ -1187,6 +1448,10 @@ static void memmoveDictionary(MMKVMapCrypt &dic,
             assert(sizeHolder >= ItemSizeHolders[sizeHolderSize] && sizeHolder <= ItemSizeHolders[sizeHolderSize]);
         }
     }
+    if (m_enableWriteBackProtection && (!vec.empty() || preparedData.first.length() > 0)) {
+        memmoveCryptedSectionsWithBackup(output, ptr, decrypter, encrypter, preparedData, vec, sizeHolderSize, sizeHolder);
+        return;
+    }
     output->writeRawVarint32(static_cast<int32_t>(sizeHolder));
     auto writePtr = output->curWritePointer();
     if (encrypter) {
@@ -1194,7 +1459,7 @@ static void memmoveDictionary(MMKVMapCrypt &dic,
     }
     if (!vec.empty()) {
         // merge nearby items to make memmove quicker
-        vector<tuple<uint32_t, uint32_t, AESCryptStatus *>> dataSections; // pair(offset, size)
+        vector<tuple<uint32_t, uint32_t, AESCryptStatus *>> dataSections; // tuple(offset, size, cryptStatus)
         dataSections.push_back(vec.front()->toTuple());
         for (size_t index = 1, total = vec.size(); index < total; index++) {
             auto kvHolder = vec[index];
@@ -1483,7 +1748,7 @@ void MMKV::clearAll(bool keepSpace) {
     writeActualSize(0, 0, nullptr, IncreaseSequence);
 #endif
 
-    m_metaFile->msync(MMKV_SYNC);
+    syncMetaFile(MMKV_SYNC);
 
     clearMemoryCache(keepSpace);
     loadFromFile();
@@ -1739,7 +2004,7 @@ bool MMKV::enableAutoKeyExpire(uint32_t expiredInSeconds) {
     if (m_file->getFileSize() == m_expectedCapacity && m_actualSize == 0) {
         MMKVInfo("file is new, don't need a full writeback [%s], just update meta file", m_mmapID.c_str());
         writeActualSize(0, 0, nullptr, IncreaseSequence);
-        m_metaFile->msync(MMKV_SYNC);
+        syncMetaFile(MMKV_SYNC);
         return true;
     }
 
@@ -1801,7 +2066,7 @@ bool MMKV::disableAutoKeyExpire() {
     if (m_file->getFileSize() == m_expectedCapacity && m_actualSize == 0) {
         MMKVInfo("file is new, don't need a full write-back [%s], just update meta file", m_mmapID.c_str());
         writeActualSize(0, 0, nullptr, IncreaseSequence);
-        m_metaFile->msync(MMKV_SYNC);
+        syncMetaFile(MMKV_SYNC);
         return true;
     }
 
@@ -2018,5 +2283,148 @@ bool MMKV::disableCompareBeforeSet() {
     m_enableCompareBeforeSet = false;
     return true;
 }
+
+void MMKV::enableWriteBackProtection() {
+    SCOPED_LOCK(m_lock);
+    SCOPED_LOCK(m_exclusiveProcessLock);
+    m_enableWriteBackProtection = true;
+    MMKVInfo("enable writeback protection for [%s]", m_mmapID.c_str());
+}
+
+void MMKV::disableWriteBackProtection() {
+    SCOPED_LOCK(m_lock);
+    SCOPED_LOCK(m_exclusiveProcessLock);
+    m_enableWriteBackProtection = false;
+    MMKVInfo("disable writeback protection for [%s]", m_mmapID.c_str());
+}
+
+
+
+bool MMKV::restoreDataFromMetaFile() {
+    if (!m_metaFile->isFileValid() || !m_file->isFileValid()) {
+        MMKVError("invalid file state for writeback protection restore in [%s]", m_mmapID.c_str());
+        return false;
+    }
+
+    auto& backupInfo = m_metaInfo->m_backupInfo;
+
+    // validate backup data boundaries
+    auto metaFileSize = m_metaFile->getFileSize();
+    auto backupDataOffset = sizeof(MMKVMetaInfo);
+    auto requiredMetaSize = backupDataOffset + backupInfo.m_backupDataSize;
+
+    if (requiredMetaSize > metaFileSize) {
+        MMKVWarning("backup data exceeds meta file boundary in [%s], required: %zu, available: %zu",
+                  m_mmapID.c_str(), requiredMetaSize, metaFileSize);
+        return false;
+    }
+
+    // validate restore target boundaries
+    auto mainFileSize = m_file->getFileSize();
+    auto restoreTargetOffset = Fixed32Size + backupInfo.m_restorePoint;
+    auto requiredMainSize = restoreTargetOffset + backupInfo.m_backupDataSize;
+
+    if (requiredMainSize > mainFileSize) {
+        MMKVWarning("restore target exceeds main file boundary in [%s], required: %zu, available: %zu",
+                  m_mmapID.c_str(), requiredMainSize, mainFileSize);
+        return false;
+    }
+
+    // backup data starts after MMKVMetaInfo
+    auto backupPtr = (uint8_t*)m_metaFile->getMemory() + backupDataOffset;
+
+    // main data starts after Fixed32Size
+    auto mainPtr = (uint8_t*)m_file->getMemory() + Fixed32Size;
+    
+    // calculate expected CRC based on backup info
+    uint32_t expectedCRC;
+    if (backupInfo.m_restorePoint > 0) {
+        // for partial restore, combine existing data CRC with backup data CRC
+        expectedCRC = (uint32_t)CRC32(0, mainPtr, backupInfo.m_restorePoint);
+        expectedCRC = (uint32_t)CRC32(expectedCRC, backupPtr, backupInfo.m_backupDataSize);
+    } else {
+        // for complete restore, backup contains entire data including sizeHolder
+        expectedCRC = (uint32_t)CRC32(0, backupPtr, backupInfo.m_backupDataSize);
+    }
+    
+    // verify CRC matches backup info
+    if (expectedCRC != backupInfo.m_restoredFileCRC) {
+        MMKVError("CRC verification failed before restore in [%s], expected: %u, calculated: %u",
+                 m_mmapID.c_str(), backupInfo.m_restoredFileCRC, expectedCRC);
+        return false;
+    }
+
+    // now safely restore data to m_file
+    memcpy(mainPtr + backupInfo.m_restorePoint, backupPtr, backupInfo.m_backupDataSize);
+
+    // update m_actualSize after restoration
+    auto restoredActualSize = backupInfo.m_restorePoint + backupInfo.m_backupDataSize;
+    m_actualSize = restoredActualSize;
+    m_crcDigest = backupInfo.m_restoredFileCRC;
+
+    uint8_t* iv = nullptr;
+
+#ifndef MMKV_DISABLE_CRYPT
+    // for encrypted MMKV, use IV from metaInfo (should match backup data)
+    if (m_crypter) {
+        iv = m_metaInfo->m_vector;
+    }
+#endif
+
+    writeActualSize(restoredActualSize, m_crcDigest, iv, KeepSequence);
+
+    MMKVInfo("restored %u bytes of protected data from meta file for [%s], actualSize: %u, CRC: %u",
+             backupInfo.m_backupDataSize, m_mmapID.c_str(), restoredActualSize, m_crcDigest);
+
+    // clear backup after successful restore
+    clearMetaFileBackup();
+
+    return true;
+}
+
+bool MMKV::ensureMetaFileSize(size_t requiredSize) {
+    auto currentSize = m_metaFile->getFileSize();
+    if (currentSize >= requiredSize) {
+        return true;
+    }
+
+    // expand meta file to accommodate backup data
+    auto newSize = roundUp<size_t>(std::max(requiredSize, currentSize * 2), DEFAULT_MMAP_SIZE);
+
+    MMKVInfo("expanding meta file for [%s] from %zu to %zu bytes for writeback protection backup",
+             m_mmapID.c_str(), currentSize, newSize);
+
+    return m_metaFile->truncate(newSize);
+}
+
+void MMKV::clearMetaFileBackup() {
+    m_metaInfo->m_backupInfo.clearData();
+    m_metaInfo->writeBackupInfoOnly(m_metaFile->getMemory());
+    MMKVInfo("cleared writeback protection backup for [%s]", m_mmapID.c_str());
+}
+
+void MMKV::syncMetaFile(SyncFlag flag) {
+    if (m_enableWriteBackProtection) {
+        // In WriteBack protection mode with active backup, only sync the MMKVMetaInfo portion
+        // to avoid the performance overhead of syncing large backup data
+        m_metaFile->msyncRange(0, sizeof(MMKVMetaInfo), flag);
+    } else {
+        // Normal mode or no active backup - sync entire metaFile
+        m_metaFile->msync(flag);
+    }
+}
+
+#ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
+void MMKV::enablePartialWriteFailureSimulation() {
+    s_simulatePartialWriteFailure = true;
+    MMKVInfo("enabled partial write failure simulation");
+}
+
+void MMKV::disablePartialWriteFailureSimulation() {
+    s_simulatePartialWriteFailure = false;
+    MMKVInfo("disabled partial write failure simulation");
+}
+#endif
+
 
 MMKV_NAMESPACE_END

@@ -299,6 +299,9 @@ PYBIND11_MODULE(mmkv, m) {
     clsMMKV.def("enableCompareBeforeSet", &MMKV::enableCompareBeforeSet, "turn on compare before set/update");
     clsMMKV.def("disableCompareBeforeSet", &MMKV::disableCompareBeforeSet, "turn off compare before set/update");
 
+    clsMMKV.def("enableWriteBackProtection", &MMKV::enableWriteBackProtection, "turn on writeBack protection to prevent data corruption from partial writes");
+    clsMMKV.def("disableWriteBackProtection", &MMKV::disableWriteBackProtection, "turn off writeBack protection");
+
     clsMMKV.def("lock", &MMKV::lock, "get exclusive access, won't return until the lock is obtained");
     clsMMKV.def("unlock", &MMKV::unlock);
     clsMMKV.def("try_lock", &MMKV::try_lock, "try to get exclusive access");
