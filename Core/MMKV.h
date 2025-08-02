@@ -146,7 +146,7 @@ class MMKV_EXPORT MMKV {
 
     bool m_enableCompareBeforeSet = false;
 
-    bool m_enableWriteBackProtection = false;
+    bool m_enableWriteBackProtection = true;
 
 #ifdef TEST_WRITEBACK_DAMAGE_RECOVERY
     // Test variables for simulating partial write failure
@@ -263,10 +263,10 @@ class MMKV_EXPORT MMKV {
     static size_t restoreAllFromDirectory(const MMKVPath_t &srcDir, const MMKVPath_t &dstDir, bool isInSpecialDir);
 
     // WriteBack protection related methods
-    bool backupDataToMetaFile(uint8_t *buffer, size_t size, uint32_t restorePoint);
     bool restoreDataFromMetaFile();
     bool ensureMetaFileSize(size_t requiredSize);
     void clearMetaFileBackup();
+    void syncMetaFile(SyncFlag flag);
 
     void memmoveDictionary(mmkv::MMKVMap &dic, mmkv::CodedOutputData *output, uint8_t *ptr, mmkv::AESCrypt *encrypter, size_t totalSize);
     uint8_t* memmoveSectionsWithBackup(const std::vector<std::pair<uint32_t, uint32_t>>& dataSections,
@@ -573,7 +573,6 @@ public:
     bool isExpirationEnabled() const { return m_enableKeyExpire; }
     bool isEncryptionEnabled() const { return m_dicCrypt; }
     bool isCompareBeforeSetEnabled() const { return m_enableCompareBeforeSet && !m_enableKeyExpire && !m_dicCrypt; }
-    bool isWriteBackProtectionEnabled() const { return m_enableWriteBackProtection; }
 
 #ifdef MMKV_APPLE
 #ifdef __OBJC__

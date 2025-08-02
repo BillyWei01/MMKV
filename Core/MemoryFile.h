@@ -156,6 +156,9 @@ public:
     bool truncate(size_t size, FileLock *fileLock = nullptr);
 
     bool msync(SyncFlag syncFlag);
+    
+    // sync only a specific range of the memory-mapped file
+    bool msyncRange(size_t offset, size_t length, SyncFlag syncFlag);
 
     // call this if clearMemoryCache() has been called
     void reloadFromFile(size_t expectedCapacity = 0);
